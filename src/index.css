@@ -1,0 +1,9 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Lora:wght@600&display=swap');
+@import "tailwindcss";
+
+:root {
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-serif: 'Lora', Georgia, serif;
+}
+* { box-sizing: border-box; }
+body { font-family: var(--font-sans); background-color: #F0F2F7; color: #1a2340; margin: 0; }
