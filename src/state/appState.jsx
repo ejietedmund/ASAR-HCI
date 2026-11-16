@@ -3,6 +3,7 @@ import { usePreferences } from '../hooks/usePreferences.js';
 import { onStorageFailure } from '../storage/db.js';
 
 export const SCREENS = {
+  HOME: 'HOME',
   IMPORT: 'IMPORT',
   READING: 'READING',
   GOAL_PLANNER: 'GOAL_PLANNER',
@@ -16,7 +17,7 @@ const STORAGE_WARNING =
 const AppContext = createContext(null);
 
 export function AppProvider({ children }) {
-  const [screen, setScreen] = useState(SCREENS.IMPORT);
+  const [screen, setScreen] = useState(SCREENS.HOME);
   const [payload, setPayload] = useState({});
   const [activeDocument, setActiveDocument] = useState(null);
   const [storageWarning, setStorageWarning] = useState(null);
@@ -33,8 +34,9 @@ export function AppProvider({ children }) {
     if (data && data.document) {
       setActiveDocument(data.document);
     }
-    if (typeof window !== 'undefined' && window.scrollTo) {
-      window.scrollTo({ top: 0 });
+    if (typeof window !== 'undefined') {
+      if (document.body) document.body.style.overflow = '';
+      if (window.scrollTo) window.scrollTo({ top: 0 });
     }
   }, []);
 

@@ -49,6 +49,10 @@ try {
 
   await page.goto(URL, { waitUntil: 'networkidle2' });
   await page.waitForFunction(() =>
+    document.body.innerText.includes('Focused reading for your study materials')
+  );
+  await clickButton(page, 'Open your library');
+  await page.waitForFunction(() =>
     document.body.innerText.includes('Upload your study material')
   );
 
@@ -56,15 +60,27 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 1500));
 
   await clickButton(page, 'Try a demo PDF');
+  await page.waitForFunction(() =>
+    document.body.innerText.includes('How long do you want to read?')
+  );
+  await clickButton(page, 'Start reading');
   await page.waitForFunction(() => document.body.innerText.includes('Chunk 1 of'));
 
   await page.setOfflineMode(true);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() =>
+    document.body.innerText.includes('Focused reading for your study materials')
+  );
+  await clickButton(page, 'Open your library');
+  await page.waitForFunction(() =>
     document.body.innerText.includes('Upload your study material')
   );
 
   await clickButton(page, 'Try a demo PDF');
+  await page.waitForFunction(() =>
+    document.body.innerText.includes('How long do you want to read?')
+  );
+  await clickButton(page, 'Start reading');
   await page.waitForFunction(() => document.body.innerText.includes('Chunk 1 of'));
 
   console.log('Offline smoke test passed');

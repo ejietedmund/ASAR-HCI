@@ -1,142 +1,203 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { evaluateGoal } from '../../engines/planner/index.js';
-import { useApp } from '../../state/appState.jsx';
+import { createSession } from '../../storage/db.js';
+import { SCREENS, useApp } from '../../state/appState.jsx';
+import { Icon, PrimaryButton } from '../shared/ui.jsx';
+
+const PRESETS = [10, 15, 20, 25, 30, 45];
 
 export default function GoalPlannerScreen() {
-  const { preferences, activeDocument } = useApp();
-  const [targetChunks, setTargetChunks] = useState(10);
-  const [availableMinutes, setAvailableMinutes] = useState(30);
-  const [result, setResult] = useState(null);
-
+  const { payload, preferences, activeDocument, navigate } = useApp();
+  const doc = payload.document || activeDocument;
+  const session = payload.session || {};
+  const chunks = doc && doc.chunks ? doc.chunks : null;
+  const total = chunks ? chunks.length : 0;
   const frequency = Number(preferences.checkpointFrequency) || 5;
-  const chunks = activeDocument?.chunks || null;
+  const startChunkIndex = doc ? doc.startChunkIndex || 0 : 0;
+  const remaining = Math.max(0, total - startChunkIndex);
+  const remainingChunks = useMemo(
+    () => (chunks ? chunks.slice(startChunkIndex) : null),
+    [chunks, startChunkIndex]
+  );
 
-  const buildResult = (target, minutes) =>
-    evaluateGoal({ targetChunks: target, availableMinutes: minutes, chunks, frequency });
+  const [minutes, setMinutes] = useState(20);
+  const [starting, setStarting] = useState(false);
 
-  const checkGoal = () => {
-    const target = Math.max(1, parseInt(targetChunks, 10) || 0);
-    const minutes = Math.max(1, parseInt(availableMinutes, 10) || 0);
-    setTargetChunks(target);
-    setAvailableMinutes(minutes);
-    setResult(buildResult(target, minutes));
+  const estimate = useMemo(() => {
+    if (!remaining) return null;
+    return evaluateGoal({
+      targetChunks: remaining,
+      availableMinutes: minutes,
+      chunks: remainingChunks,
+      frequency,
+    });
+  }, [remaining, minutes, remainingChunks, frequency]);
+
+  const startReading = async (chosenMinutes) => {
+    if (!doc || !doc.chunks || !doc.chunks.length) return;
+    setStarting(true);
+    try {
+      let sessionId = session.sessionId;
+      if (sessionId === undefined || sessionId === null) {
+        sessionId = await createSession({ documentId: doc.documentId, startedAt: Date.now() });
+      }
+      navigate(SCREENS.READING, {
+        document: { ...doc },
+        session: { sessionId },
+        goal: { minutes: chosenMinutes },
+      });
+    } finally {
+      setStarting(false);
+    }
   };
 
-  const acceptPlan = () => {
-    if (!result || !result.suggestedChunks) return;
-    const nextTarget = Math.max(1, result.suggestedChunks);
-    setTargetChunks(nextTarget);
-    setResult(buildResult(nextTarget, availableMinutes));
-  };
+  if (!doc || !total) {
+    return (
+      <div className="max-w-[560px] mx-auto px-4 sm:px-6 py-8 sm:py-12">
+        <div className="bg-card border border-sep rounded-[24px] shadow-card p-8 text-center">
+          <span className="mx-auto w-12 h-12 rounded-2xl bg-fill text-ink2 flex items-center justify-center">
+            <Icon name="target" className="w-6 h-6" />
+          </span>
+          <h1 className="mt-4 text-[22px] font-semibold text-ink">No document selected</h1>
+          <p className="mt-1.5 text-ink2 text-[15px] leading-relaxed">
+            Upload a lecture PDF or slide deck first, then choose how long you want to read.
+          </p>
+          <PrimaryButton className="mt-6" onClick={() => navigate(SCREENS.IMPORT)}>
+            Go to library
+          </PrimaryButton>
+        </div>
+      </div>
+    );
+  }
+
+  const fullEstimateMinutes = estimate ? Math.max(1, Math.round(estimate.estimatedMinutes)) : 0;
+  const suggestedChunks = estimate ? estimate.suggestedChunks : 0;
+  const coverPercent = remaining ? Math.round((suggestedChunks / remaining) * 100) : 0;
+  const shorterThanOneChunk = Boolean(estimate) && suggestedChunks === 0;
+  const firstChunkWords = remainingChunks && remainingChunks[0] ? remainingChunks[0].wordCount || 0 : 0;
+  const minimumMinutes = Math.max(1, Math.ceil(firstChunkWords / 120));
 
   return (
-    <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
-      <div className="grid md:grid-cols-2 gap-6 items-start">
-        <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-6 sm:p-8">
-          <h1 className="text-2xl font-semibold text-[#1a2340]">Set a reading goal</h1>
-          <p className="mt-2 text-slate-500">
-            Pick how many chunks you want to read and how much time you have. We will check whether
-            the plan is realistic.
+    <div className="max-w-[560px] mx-auto px-4 sm:px-6 py-8 sm:py-10 anim-slide">
+      <div className="bg-card border border-sep rounded-[24px] shadow-card overflow-hidden">
+        <div className="bg-brand px-6 py-5">
+          <p className="text-[12px] font-semibold uppercase tracking-widest text-white/70">
+            Reading goal
           </p>
-
-          <label className="block mt-6 text-sm font-medium text-slate-600" htmlFor="goal-chunks">
-            Chunks to read
-          </label>
-          <input
-            id="goal-chunks"
-            type="number"
-            min={1}
-            max={999}
-            value={targetChunks}
-            onChange={(event) => setTargetChunks(event.target.value)}
-            className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-base text-[#1a2340] focus:outline-none focus:border-[#2563EB] focus:ring-2 focus:ring-blue-100"
-          />
-
-          <label className="block mt-4 text-sm font-medium text-slate-600" htmlFor="goal-minutes">
-            Minutes available
-          </label>
-          <input
-            id="goal-minutes"
-            type="number"
-            min={1}
-            max={999}
-            value={availableMinutes}
-            onChange={(event) => setAvailableMinutes(event.target.value)}
-            className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 text-base text-[#1a2340] focus:outline-none focus:border-[#2563EB] focus:ring-2 focus:ring-blue-100"
-          />
-
-          <button
-            type="button"
-            onClick={checkGoal}
-            className="mt-6 w-full sm:w-auto px-6 py-3 rounded-xl bg-[#1e3a8a] hover:bg-[#1e40af] text-white text-sm font-medium transition-colors"
-          >
-            Check my goal
-          </button>
+          <h1 className="mt-1 text-[22px] font-semibold text-white leading-snug truncate">
+            {doc.fileName}
+          </h1>
+          <p className="mt-1 text-[13px] text-white/80">
+            {remaining} chunk{remaining === 1 ? '' : 's'} left · about {fullEstimateMinutes} min to
+            read fully
+            {startChunkIndex > 0 ? ` · continuing from chunk ${startChunkIndex + 1}` : ''}
+          </p>
         </div>
 
-        {result && result.feasible && (
-          <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-6 sm:p-8">
-            <span className="inline-block bg-green-100 text-green-700 text-xs font-semibold px-3 py-1 rounded-full">
-              Looks good
-            </span>
-            <p className="mt-4 text-[#1a2340] leading-relaxed">
-              Your goal of <span className="font-semibold">{result.targetChunks} chunks</span> in{' '}
-              <span className="font-semibold">{result.availableMinutes} minutes</span> is doable.
-            </p>
-            <p className="mt-2 text-slate-500 leading-relaxed">
-              At 200 words per minute plus {result.checkpoints} check-in
-              {result.checkpoints === 1 ? '' : 's'}, it should take about{' '}
-              <span className="font-medium text-[#1a2340]">{result.estimatedMinutes} minutes</span> —
-              comfortably inside your {result.availableMinutes}-minute window.
-            </p>
-            <div className="mt-5 rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-sm text-slate-600">
-              Reading time {Math.round(result.readingSeconds / 60)} min · checkpoint time{' '}
-              {Math.round((result.checkpoints * 90) / 60)} min
+        <div className="p-6 sm:p-8">
+          <div className="flex items-center gap-2">
+            <Icon name="clock" className="w-4.5 h-4.5 text-brand" />
+            <h2 className="text-[17px] font-semibold text-ink">How long do you want to read?</h2>
+          </div>
+          <p className="mt-1 text-[14px] text-ink2 leading-relaxed">
+            Pick a time budget. You'll get a gentle reminder when it's used up.
+          </p>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            {PRESETS.map((preset) => {
+              const selected = minutes === preset;
+              return (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => setMinutes(preset)}
+                  className={`px-4 py-2.5 rounded-full text-[14px] font-semibold transition-all active:scale-[0.96] ${
+                    selected
+                      ? 'bg-brand text-white shadow-[0_2px_8px_rgba(0,122,255,0.35)]'
+                      : 'bg-fill text-ink hover:bg-fill-strong'
+                  }`}
+                >
+                  {preset} min
+                </button>
+              );
+            })}
+            <div
+              className={`flex items-center gap-1.5 px-3 rounded-full ${
+                PRESETS.includes(minutes) ? 'bg-fill' : 'bg-brand-soft border border-brand'
+              }`}
+            >
+              <input
+                id="goal-minutes"
+                data-testid="goal-minutes-input"
+                type="number"
+                min={1}
+                max={999}
+                value={minutes}
+                onChange={(event) => setMinutes(Math.max(1, parseInt(event.target.value, 10) || 1))}
+                className="w-12 bg-transparent text-center text-[14px] font-semibold text-ink py-2.5 focus:outline-none"
+                aria-label="Custom minutes"
+              />
+              <span className="text-[13px] font-medium text-ink2 pr-1.5">min</span>
             </div>
           </div>
-        )}
 
-        {result && !result.feasible && (
-          <div className="bg-[#FEF3C7] border border-[#FDE68A] rounded-2xl p-6 sm:p-8">
-            <span className="inline-block bg-amber-200 text-amber-800 text-xs font-semibold px-3 py-1 rounded-full">
-              Needs adjusting
-            </span>
-            <p className="mt-4 text-[#1a2340] leading-relaxed">
-              Reading {result.targetChunks} chunks would take about{' '}
-              <span className="font-semibold">{result.estimatedMinutes} minutes</span>, which is more
-              than the {result.availableMinutes} minutes you have.
-            </p>
-
-            <div className="mt-4 bg-white rounded-xl border border-white shadow-sm px-4 py-4">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Suggested plan
+          {estimate && (
+            <div className="mt-6 rounded-[18px] bg-bg border border-sep px-5 py-4 anim-fade" key={minutes}>
+              {estimate.feasible ? (
+                <p className="text-[14px] text-ink leading-relaxed">
+                  <span className="font-semibold text-green">Looks good.</span>{' '}
+                  {remaining === 1
+                    ? `This ${minutes}-minute goal covers the last chunk.`
+                    : `This ${minutes}-minute goal covers all ${remaining} remaining chunks`}
+                  {estimate.checkpoints > 0
+                    ? `, including ${estimate.checkpoints} check-in${estimate.checkpoints === 1 ? '' : 's'}.`
+                    : '.'}
+                </p>
+              ) : (
+                <p className="text-[14px] text-ink leading-relaxed">
+                  <span className="font-semibold">In {minutes} minute{minutes === 1 ? '' : 's'}</span> you'll read about{' '}
+                  <span className="font-semibold">
+                    {suggestedChunks} of {remaining} remaining chunk{remaining === 1 ? '' : 's'}
+                  </span>{' '}
+                  (~{coverPercent}% of what's left). The rest can wait for a second session.
+                </p>
+              )}
+              {shorterThanOneChunk && (
+                <p className="mt-2 text-[13px] font-medium text-red">
+                  This goal is shorter than a single chunk. Pick at least {minimumMinutes} min for
+                  one chunk, or read without a time limit.
+                </p>
+              )}
+              <div className="mt-3 h-1.5 rounded-full bg-fill overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-brand transition-all duration-500"
+                  style={{ width: `${estimate.feasible ? 100 : coverPercent}%` }}
+                />
+              </div>
+              <p className="mt-2 text-[12px] text-ink3">
+                Based on a comfortable reading pace plus a moment for each check-in
               </p>
-              <p className="mt-2 text-[#1a2340] leading-relaxed">{result.planText}</p>
             </div>
+          )}
 
-            <div className="mt-5 flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                onClick={acceptPlan}
-                disabled={!result.suggestedChunks}
-                className={`px-5 py-2.5 rounded-xl text-sm font-medium transition-colors ${
-                  result.suggestedChunks
-                    ? 'bg-[#1e3a8a] hover:bg-[#1e40af] text-white'
-                    : 'bg-white/60 text-amber-800 cursor-not-allowed'
-                }`}
-              >
-                Accept plan
-              </button>
-              <button
-                type="button"
-                onClick={() => setResult(null)}
-                className="px-5 py-2.5 rounded-xl border border-amber-300 bg-white text-sm font-medium text-[#1a2340] hover:bg-amber-50 transition-colors"
-              >
-                Keep my goal
-              </button>
-            </div>
+          <div className="mt-7 flex flex-col gap-3">
+            <PrimaryButton
+              className="w-full py-4 text-[16px]"
+              disabled={starting || shorterThanOneChunk}
+              onClick={() => startReading(minutes)}
+            >
+              Start reading{starting ? '…' : ''}
+            </PrimaryButton>
+            <button
+              type="button"
+              disabled={starting}
+              onClick={() => startReading(null)}
+              className="w-full py-3 rounded-full text-[15px] font-medium text-ink2 hover:text-ink transition-colors disabled:opacity-40"
+            >
+              Read without a time limit
+            </button>
           </div>
-        )}
+        </div>
       </div>
     </div>
   );

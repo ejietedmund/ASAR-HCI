@@ -2,8 +2,15 @@ import assert from 'node:assert';
 import { inflateSync } from 'node:zlib';
 import JSZip from 'jszip';
 import * as pdfjsLib from 'pdfjs-dist';
-import { chunkPptx } from '../src/engines/chunking/pptxChunker.js';
-import { chunkPdf, sanitiseStr, expandBullets } from '../src/engines/chunking/pdfChunker.js';
+import { chunkPptx, parseSlideParagraphs } from '../src/engines/chunking/pptxChunker.js';
+import {
+  chunkPdf,
+  sanitiseStr,
+  expandBullets,
+  looksLikePageNumber,
+  isHeadingLine,
+  splitBulletSegments,
+} from '../src/engines/chunking/pdfChunker.js';
 import { validateFile, chunkFile, withDocumentMeta } from '../src/engines/chunking/index.js';
 import { applyPacing } from '../src/engines/pacing/index.js';
 import { detectFatigue } from '../src/engines/scheduler/index.js';
@@ -34,8 +41,8 @@ function esc(text) {
   return text.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
 }
 
-function wrapLine(text, x, size) {
-  const usable = 612 - x - 18;
+function wrapLine(text, x, size, pageWidth = 612) {
+  const usable = pageWidth - x - 18;
   const maxChars = Math.max(20, Math.floor(usable / (0.62 * size)));
   if (text.length <= maxChars) return [text];
   const parts = [];
@@ -54,7 +61,8 @@ function wrapLine(text, x, size) {
   return parts;
 }
 
-function makePdf(pagesLines, pageExtras = []) {
+function makePdf(pagesLines, pageExtras = [], { mediaBox = [612, 792] } = {}) {
+  const [mediaWidth, mediaHeight] = mediaBox;
   const objs = [];
   const push = (body) => {
     objs.push(body);
@@ -79,7 +87,7 @@ function makePdf(pagesLines, pageExtras = []) {
     for (const line of lines) {
       const dx = first ? line.x : line.x - curX;
       const dy = first ? line.y : line.y - curY;
-      const parts = wrapLine(line.text, line.x, line.size);
+      const parts = wrapLine(line.text, line.x, line.size, mediaWidth);
       const step = -(line.size * 1.2);
       parts.forEach((part, index) => {
         const move = index === 0 ? `${dx} ${dy} Td` : `0 ${step} Td`;
@@ -99,7 +107,7 @@ function makePdf(pagesLines, pageExtras = []) {
       ? ` /XObject << ${extras.images.map((image) => `/${image.name} ${xobjIds[image.name]} 0 R`).join(' ')} >>`
       : '';
     const pageNum = push(
-      `<< /Type /Page /Parent ${pagesNum} 0 R /MediaBox [0 0 612 792] /Contents ${contentNum} 0 R /Resources << /Font << /F1 ${fontNum} 0 R >>${xobjPart} >> >>`
+      `<< /Type /Page /Parent ${pagesNum} 0 R /MediaBox [0 0 ${mediaWidth} ${mediaHeight}] /Contents ${contentNum} 0 R /Resources << /Font << /F1 ${fontNum} 0 R >>${xobjPart} >> >>`
     );
     pageNums.push(pageNum);
   }
@@ -138,11 +146,11 @@ await ok('validateFile accepts pdf and pptx', () => {
 
 await ok('expectedReadingTime floors at 10 seconds', () => {
   assert.equal(expectedReadingTime(0), 10);
-  assert.equal(expectedReadingTime(400), 120);
+  assert.equal(expectedReadingTime(400), 200);
 });
 
 await ok('capTimeSpent caps at 3x expected', () => {
-  assert.equal(capTimeSpent(10 * 60 * 1000, 200), 180000);
+  assert.equal(capTimeSpent(10 * 60 * 1000, 200), 300000);
 });
 
 await ok('createChunkTimer accumulates and stops', async () => {
@@ -236,7 +244,7 @@ await ok('report aggregates logs and annotations', () => {
   assert.equal(report.avgTimePerChunk, 60.3);
 });
 
-await ok('pptx chunking extracts titles, bodies, order and empty slides', async () => {
+await ok('pptx keeps one slide per chunk, even for tiny slides', async () => {
   const slide = (runs) =>
     `<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree>${runs
       .map(
@@ -251,18 +259,72 @@ await ok('pptx chunking extracts titles, bodies, order and empty slides', async 
   zip.file('ppt/slides/slide10.xml', slide(['Slide ten', 'Body ten.']));
   const buffer = await zip.generateAsync({ type: 'nodebuffer' });
   const chunks = await chunkPptx(buffer);
-  assert.equal(chunks.length, 4);
+  assert.equal(chunks.length, 3, `expected 3 chunks, got ${chunks.length}`);
+  assert.deepEqual(chunks.map((chunk) => chunk.slides), [[1], [2], [10]], 'empty slide 3 is skipped');
+  assert.deepEqual(chunks.map((chunk) => chunk.pageRef), [1, 2, 10]);
   assert.deepEqual(
-    chunks.map((c) => c.pageRef),
-    [1, 2, 3, 10]
+    chunks.map((chunk) => chunk.chunkingMethod),
+    ['slides', 'slides', 'slides']
   );
   assert.equal(chunks[0].title, 'Neural Networks & Learning');
-  assert.equal(chunks[0].body, 'Line one.\n\nLine two.');
   assert.equal(chunks[0].hasText, true);
-  assert.equal(chunks[0].chunkingMethod, 'slide');
-  assert.equal(chunks[1].body, '');
-  assert.equal(chunks[2].hasText, false);
-  assert.equal(chunks[2].title, 'Slide 3');
+  assert.ok(chunks[0].body.includes('• Line one.'), chunks[0].body);
+  assert.ok(chunks[0].body.includes('• Line two.'), chunks[0].body);
+  assert.ok(!chunks[0].body.includes('# '), 'slide title is the chunk title, not a repeated heading');
+  assert.equal(chunks[1].title, 'Slide two title');
+  assert.equal(chunks[1].hasText, false);
+  assert.equal(chunks[2].title, 'Slide ten');
+  assert.ok(chunks[2].body.includes('• Body ten.'), chunks[2].body);
+});
+
+await ok('pptx splits long slide decks one slide per chunk', async () => {
+  const sentence = 'Attention models weigh every input token when producing each output. ';
+  const slide = (title, body) =>
+    `<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>${title}</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:txBody><a:p><a:r><a:t>${body}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`;
+  const zip = new JSZip();
+  const totalSlides = 12;
+  for (let i = 1; i <= totalSlides; i += 1) {
+    zip.file(
+      `ppt/slides/slide${i}.xml`,
+      slide(`Slide ${i}: Transformers`, sentence.repeat(10).trim())
+    );
+  }
+  const buffer = await zip.generateAsync({ type: 'nodebuffer' });
+  const chunks = await chunkPptx(buffer);
+  assert.equal(chunks.length, totalSlides, `expected ${totalSlides} chunks, got ${chunks.length}`);
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.slides),
+    Array.from({ length: totalSlides }, (_, i) => [i + 1])
+  );
+  for (const chunk of chunks) {
+    assert.ok(
+      chunk.wordCount >= 70 && chunk.wordCount <= 280,
+      `chunk length should stay inside the target range: ${chunk.wordCount}`
+    );
+  }
+  assert.equal(chunks[1].title, 'Slide 2: Transformers');
+  assert.ok(chunks[1].body.includes('• Attention models'), 'body bullets are formatted');
+  assert.ok(!chunks[1].body.includes('# Slide 2'), 'a lone slide heading is the chunk title');
+});
+
+await ok('pptx bullets keep their nesting levels and numbered lists survive', () => {
+  const xml =
+    '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree>' +
+    '<p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:r><a:t>Deck title</a:t></a:r></a:p></p:txBody></p:sp>' +
+    '<p:sp><p:txBody>' +
+    '<a:p><a:pPr lvl="0" marL="342900"><a:buChar char="•"/></a:pPr><a:r><a:t>Top bullet</a:t></a:r></a:p>' +
+    '<a:p><a:pPr lvl="1" marL="685800"><a:buChar char="-"/></a:pPr><a:r><a:t>Nested bullet</a:t></a:r></a:p>' +
+    '<a:p><a:pPr marL="342900"><a:buAutoNum type="arabicPeriod"/></a:pPr><a:r><a:t>Numbered one</a:t></a:r></a:p>' +
+    '<a:p><a:pPr marL="342900"><a:buAutoNum type="arabicPeriod"/></a:pPr><a:r><a:t>Numbered two</a:t></a:r></a:p>' +
+    '</p:txBody></p:sp></p:spTree></p:cSld></p:sld>';
+  const { title, paragraphs } = parseSlideParagraphs(xml);
+  assert.equal(title, 'Deck title');
+  assert.equal(paragraphs.length, 4);
+  assert.equal(paragraphs[0].level, 0);
+  assert.equal(paragraphs[1].level, 1);
+  assert.equal(paragraphs[2].isNumbered, true);
+  assert.equal(paragraphs[3].isNumbered, true);
+  assert.equal(paragraphs[0].numbered, true);
 });
 
 await ok('private-use bullet glyphs become readable bullet lines', () => {
@@ -279,7 +341,7 @@ await ok('stray bullet sentinels are stripped when there is no list', () => {
   assert.equal(expandBullets('Plain text §BULLET§'), 'Plain text');
 });
 
-await ok('pdf heading strategy splits on headings and strips running headers', async () => {
+await ok('pdf heading strategy makes uniform chunks and strips running headers', async () => {
   const pages = [];
   const headings = ['Introduction', 'Background', 'Applications'];
   for (let p = 0; p < 3; p += 1) {
@@ -295,15 +357,29 @@ await ok('pdf heading strategy splits on headings and strips running headers', a
     pages.push(lines);
   }
   const chunks = await chunkPdf(makePdf(pages));
-  assert.equal(chunks.length, 3, `expected 3 chunks, got ${chunks.length}: ${chunks.map((c) => c.title).join(' | ')}`);
+  assert.equal(
+    chunks.length,
+    6,
+    `expected 6 chunks, got ${chunks.length}: ${chunks.map((c) => c.title).join(' | ')}`
+  );
   assert.equal(chunks[0].title, 'Introduction');
+  assert.equal(chunks[1].title, 'Introduction (continued)');
+  assert.equal(chunks[2].title, 'Background');
+  assert.equal(chunks[3].title, 'Background (continued)');
   assert.equal(chunks[0].chunkingMethod, 'heading');
   assert.ok(!chunks[0].body.includes('UNIVERSITY OF EXAMPLE'), 'running header should be stripped');
-  assert.ok(chunks[0].wordCount > 100);
-  assert.ok(chunks.every((c) => c.hasText));
+  for (const chunk of chunks) {
+    assert.ok(chunk.hasText);
+    assert.ok(
+      chunk.wordCount >= 150 && chunk.wordCount <= 300,
+      `chunk should stay near the target: ${chunk.wordCount}`
+    );
+  }
+  const spread = Math.abs(chunks[0].wordCount - chunks[1].wordCount);
+  assert.ok(spread <= 60, `chunks within a section should be even: ${chunks[0].wordCount} vs ${chunks[1].wordCount}`);
 });
 
-await ok('pdf paragraph strategy groups paragraphs into 250-word chunks', async () => {
+await ok('pdf paragraph strategy keeps chunks near the target length', async () => {
   const lines = [];
   let y = 740;
   for (let para = 0; para < 8; para += 1) {
@@ -316,7 +392,115 @@ await ok('pdf paragraph strategy groups paragraphs into 250-word chunks', async 
   const chunks = await chunkPdf(makePdf([lines]));
   assert.ok(chunks.length >= 2, `expected >= 2 chunks, got ${chunks.length}`);
   assert.equal(chunks[0].chunkingMethod, 'paragraph');
-  for (const chunk of chunks) assert.ok(chunk.wordCount <= 400, `chunk too big: ${chunk.wordCount}`);
+  for (const chunk of chunks) {
+    assert.ok(chunk.wordCount <= 280, `chunk too big: ${chunk.wordCount}`);
+    assert.ok(chunk.wordCount >= 70, `chunk too small: ${chunk.wordCount}`);
+  }
+  const counts = chunks.map((chunk) => chunk.wordCount);
+  const max = Math.max(...counts);
+  const min = Math.min(...counts);
+  assert.ok(max / min <= 1.5, `chunks should be uniform: ${counts.join(', ')}`);
+});
+
+await ok('pdf footer and header page numbers are removed from chunk text', async () => {
+  assert.equal(looksLikePageNumber('12'), true);
+  assert.equal(looksLikePageNumber('Page 3'), true);
+  assert.equal(looksLikePageNumber('Page 3.'), true);
+  assert.equal(looksLikePageNumber('- 7 -'), true);
+  assert.equal(looksLikePageNumber('3 / 20'), true);
+  assert.equal(looksLikePageNumber('Chapter 3'), false);
+  assert.equal(looksLikePageNumber('Section 2.1'), false);
+  assert.equal(looksLikePageNumber('Figure 4'), false);
+
+  const page = (heading, pageNumber) => [
+    { size: 24, x: 72, y: 720, text: heading },
+    { size: 12, x: 72, y: 690, text: BODY_LONG },
+    { size: 12, x: 72, y: 672, text: BODY_LONG },
+    { size: 12, x: 72, y: 654, text: BODY_LONG },
+    { size: 10, x: 300, y: 30, text: pageNumber },
+    { size: 10, x: 300, y: 770, text: pageNumber },
+  ];
+  const chunks = await chunkPdf(makePdf([page('Alpha', 'Page 1'), page('Beta', 'Page 2')]));
+  assert.equal(chunks.length, 2, chunks.map((chunk) => chunk.title).join(' | '));
+  const text = chunks.map((chunk) => chunk.body).join('\n');
+  assert.ok(!/page 1/i.test(text), text.slice(0, 200));
+  assert.ok(!/page 2/i.test(text), text.slice(-200));
+});
+
+await ok('pdf starts a new chunk at every heading, even for short sections', async () => {
+  const headings = ['One', 'Two', 'Three', 'Four', 'Five', 'Six'];
+  const lines = [];
+  let y = 730;
+  for (const heading of headings) {
+    lines.push({ size: 24, x: 72, y, text: heading });
+    y -= 44;
+    lines.push({
+      size: 12,
+      x: 72,
+      y,
+      text: 'Short section text that is deliberately brief and easy to skim through quickly.',
+    });
+    y -= 60;
+  }
+  const chunks = await chunkPdf(makePdf([lines]));
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.title),
+    headings,
+    chunks.map((chunk) => `${chunk.title}:${chunk.wordCount}`).join(' | ')
+  );
+  for (const chunk of chunks) {
+    assert.ok(chunk.body.includes('deliberately brief'), chunk.body);
+    assert.ok(!chunk.body.includes('#'), 'no other section leaks into a heading chunk');
+  }
+});
+
+await ok('pdf heading detection rejects long or sentence-like lines', async () => {
+  const bodySize = 12;
+  const line = (text, fontSize, fontFamily = 'ArialMT') => ({ text, fontSize, fontFamily });
+  assert.equal(isHeadingLine(line('Introduction', 24), bodySize), true);
+  assert.equal(isHeadingLine(line('Why attention matters?', 24), bodySize), true);
+  assert.equal(isHeadingLine(line('Methods', 13.5, 'Arial-BoldMT'), bodySize), true);
+  assert.equal(isHeadingLine(line('RESULTS', 12), bodySize), true);
+  assert.equal(isHeadingLine(line('Body copy stays body copy', 12), bodySize), false);
+  assert.equal(
+    isHeadingLine(
+      line('A Very Long Heading That Runs Across The Entire Line And Keeps Going On And On', 24),
+      bodySize
+    ),
+    false
+  );
+  assert.equal(
+    isHeadingLine(line('Attention '.repeat(20).trim(), 24), bodySize),
+    false,
+    'a heading can never be a whole chunk of text'
+  );
+  assert.equal(isHeadingLine(line('This sentence ends like a normal paragraph.', 24), bodySize), false);
+  assert.equal(isHeadingLine(line('Figure 2. Attention overview.', 13.5), bodySize), false);
+  assert.equal(isHeadingLine(line('UNIVERSITY OF EXAMPLE', 10), bodySize), false);
+});
+
+await ok('pdf keeps every section inside the hard word maximum', async () => {
+  const lines = [];
+  let y = 740;
+  const sectionWords = `${BODY_LONG} ${BODY_LONG}`;
+  for (let section = 0; section < 6; section += 1) {
+    lines.push({ size: 24, x: 72, y, text: `Section ${section + 1}` });
+    y -= 40;
+    for (let line = 0; line < 4; line += 1) {
+      lines.push({ size: 12, x: 72, y, text: `${sectionWords} Part ${line + 1}.` });
+      y -= 16;
+    }
+    y -= 10;
+  }
+  const chunks = await chunkPdf(makePdf([lines]));
+  assert.ok(chunks.length >= 6, `expected at least one chunk per section: ${chunks.length}`);
+  for (const chunk of chunks) {
+    assert.ok(chunk.wordCount <= 280, `chunk over the hard cap: ${chunk.wordCount}`);
+  }
+  assert.ok(
+    chunks.filter((chunk) => chunk.title === 'Section 1').length === 1,
+    'the first section keeps its own heading chunk'
+  );
 });
 
 await ok('pdf falls back to page chunking for tiny documents', async () => {
@@ -326,6 +510,52 @@ await ok('pdf falls back to page chunking for tiny documents', async () => {
   assert.equal(chunks.length, 1);
   assert.equal(chunks[0].chunkingMethod, 'page');
   assert.equal(chunks[0].title, 'Page 1');
+});
+
+await ok('pdf detects slide-deck exports and keeps one page per chunk', async () => {
+  const filler = [
+    'Short bullets keep the slide readable.',
+    'Each slide carries one idea.',
+    'Visual hierarchy guides attention.',
+    'Whitespace gives the eye rest.',
+  ];
+  const pages = [];
+  for (let p = 1; p <= 6; p += 1) {
+    const lines = [{ size: 30, x: 60, y: 80, text: `Deck slide ${p}` }];
+    filler.forEach((text, index) => {
+      lines.push({ size: 18, x: 60, y: 150 + index * 40, text: `${text} ${p}-${index}` });
+    });
+    pages.push(lines);
+  }
+  const chunks = await chunkPdf(makePdf(pages, [], { mediaBox: [960, 540] }));
+  assert.equal(chunks.length, 6, `expected one chunk per slide: ${chunks.length}`);
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.chunkingMethod),
+    Array.from({ length: 6 }, () => 'slides')
+  );
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.title),
+    Array.from({ length: 6 }, (_, i) => `Deck slide ${i + 1}`)
+  );
+  chunks.forEach((chunk, index) => {
+    assert.equal(chunk.pageRef, index + 1);
+    assert.ok(chunk.wordCount > 0, 'slide body survives chunking');
+  });
+});
+
+await ok('pdf splits bullet runs so headings stay short', () => {
+  const parts = splitBulletSegments(
+    'How to minimize Overfitting §BULLET§ Reduce model complexity §BULLET§ Training with more data §BULLET§ Early stopping'
+  );
+  assert.deepEqual(parts, [
+    'How to minimize Overfitting',
+    '• Reduce model complexity',
+    '• Training with more data',
+    '• Early stopping',
+  ]);
+  assert.equal(isHeadingLine({ text: parts[0], fontSize: 22, fontFamily: 'Arial-Bold' }, 12), true);
+  assert.equal(isHeadingLine({ text: parts[1], fontSize: 22, fontFamily: 'Arial-Bold' }, 12), false);
+  assert.equal(isHeadingLine({ text: 'Title §BULLET§ body', fontSize: 22 }, 12), false);
 });
 
 await ok('chunkFile surfaces no-readable-content errors', async () => {
@@ -369,8 +599,12 @@ await ok('pdf carries images into the chunk whose text surrounds them', async ()
     { size: 10, x: 72, y: 770, text: 'UNIVERSITY OF EXAMPLE' },
     { size: 24, x: 72, y: 720, text: 'Introduction' },
     { size: 12, x: 72, y: 690, text: BODY_LONG },
+    { size: 12, x: 72, y: 672, text: BODY_LONG },
+    { size: 12, x: 72, y: 654, text: BODY_LONG },
     { size: 24, x: 72, y: 300, text: 'Methods' },
     { size: 12, x: 72, y: 270, text: BODY_LONG },
+    { size: 12, x: 72, y: 252, text: BODY_LONG },
+    { size: 12, x: 72, y: 234, text: BODY_LONG },
   ];
   const chunks = await chunkPdf(
     makePdf(
@@ -385,7 +619,7 @@ await ok('pdf carries images into the chunk whose text surrounds them', async ()
   );
   assert.equal(chunks.length, 2, chunks.map((c) => c.title).join(' | '));
   assert.equal(chunks[0].images.length, 0, 'figure must not leak into the first section');
-  assert.equal(chunks[1].images.length, 1, 'figure sits below the Methods heading');
+  assert.equal(chunks[1].images.length, 1, 'figure sits with the closest text');
   const src = chunks[1].images[0].src;
   assert.ok(src.startsWith('data:image/png;base64,'), src.slice(0, 40));
   const png = Buffer.from(src.slice('data:image/png;base64,'.length), 'base64');
@@ -397,6 +631,7 @@ await ok('pdf carries images into the chunk whose text surrounds them', async ()
   assert.deepEqual([...raw.slice(0, 5)], [0, 255, 0, 0, 255], 'first pixel survives as-is');
   assert.equal(chunks[1].images[0].width, 4);
   assert.equal(chunks[1].images[0].height, 4);
+  assert.equal(chunks[1].images[0].page, 1, 'image records its page for the caption');
 });
 
 await ok('pdf image-only documents import as image chunks', async () => {
@@ -418,7 +653,7 @@ await ok('pdf image-only documents import as image chunks', async () => {
   assert.equal(viaFile.length, 1, 'image-only pdf must pass the readable-content check');
 });
 
-await ok('pptx carries slide media and skips unsupported media types', async () => {
+await ok('pptx strips embedded slide media (images removed)', async () => {
   const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
   const spRuns = (runs) =>
     runs
@@ -448,28 +683,20 @@ await ok('pptx carries slide media and skips unsupported media types', async () 
   const buffer = await zip.generateAsync({ type: 'nodebuffer' });
 
   const chunks = await chunkPptx(buffer);
-  assert.equal(chunks.length, 3);
+  // Slide 2 becomes empty once media is stripped, so it is skipped.
+  assert.equal(chunks.length, 2, `text-bearing slides become chunks, got ${chunks.length}`);
+  assert.deepEqual(
+    chunks.map((chunk) => chunk.slides),
+    [[1], [3]]
+  );
   assert.equal(chunks[0].title, 'Picture slide');
-  assert.equal(chunks[0].images.length, 1, 'only the renderable png is carried');
-  const expected = `data:image/png;base64,${imageBytes.toString('base64')}`;
-  assert.equal(chunks[0].images[0].src, expected);
-  assert.equal(chunks[1].hasText, false, 'image-only slide has no text');
-  assert.equal(chunks[1].images.length, 1, 'image-only slide keeps its picture');
-  assert.equal(chunks[1].images[0].src, expected);
-  assert.equal(chunks[2].images.length, 0, 'text-only slide has no pictures');
+  assert.equal(chunks[0].images.length, 0, 'pptx images must be removed');
+  assert.ok(chunks[0].body.includes('• Body one.'), chunks[0].body);
+  assert.equal(chunks[1].title, 'Text only, no media');
+  assert.equal(chunks[1].images.length, 0);
 
   const viaFile = await chunkFile({ name: 'deck.pptx', size: buffer.length }, buffer);
-  assert.equal(viaFile.length, 3);
-
-  const onlyImage = new JSZip();
-  onlyImage.file('ppt/slides/slide1.xml', slideWithPicture([]));
-  onlyImage.file('ppt/slides/_rels/slide1.xml.rels', rels);
-  onlyImage.file('ppt/media/image1.png', imageBytes);
-  const imageOnlyBuffer = await onlyImage.generateAsync({ type: 'nodebuffer' });
-  const imageOnlyChunks = await chunkFile({ name: 'art.pptx', size: imageOnlyBuffer.length }, imageOnlyBuffer);
-  assert.equal(imageOnlyChunks.length, 1);
-  assert.equal(imageOnlyChunks[0].hasText, false);
-  assert.equal(imageOnlyChunks[0].images.length, 1, 'deck with only pictures is readable');
+  assert.equal(viaFile.length, 2);
 });
 
 console.log(`\n${passed} engine tests passed`);

@@ -1,6 +1,6 @@
-export const READING_SPEED_WPM = 200;
+export const READING_SPEED_WPM = 120;
 export const CHECKPOINT_OVERHEAD_SECONDS = 90;
-export const DEFAULT_WORDS_PER_CHUNK = 250;
+export const DEFAULT_WORDS_PER_CHUNK = 220;
 
 function readingSecondsForWords(words) {
   return (words / READING_SPEED_WPM) * 60;
@@ -51,7 +51,7 @@ export function evaluateGoal({ targetChunks, availableMinutes, chunks = null, fr
 
   const planText =
     suggestedChunks > 0
-      ? `Read ${suggestedChunks} chunks now, then finish the rest in a second session.`
+      ? `Read ${suggestedChunks} chunk${suggestedChunks === 1 ? '' : 's'} now, then finish the rest in a second session.`
       : `Your ${minutes}-minute window is shorter than a single chunk. Try a longer window, then finish the rest in a second session.`;
 
   return {

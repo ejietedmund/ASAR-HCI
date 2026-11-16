@@ -1,4 +1,4 @@
-export const READING_SPEED_WPM = 200;
+export const READING_SPEED_WPM = 120;
 
 export function expectedReadingTime(wordCount) {
   const words = Number.isFinite(wordCount) ? Math.max(0, wordCount) : 0;

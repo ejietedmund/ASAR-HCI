@@ -6,7 +6,8 @@ const DB_VERSION = 1;
 export const DEFAULT_PREFERENCES = {
   id: 'singleton',
   textSize: 'medium',
-  contrast: 'standard',
+  theme: 'system',
+  readingFont: 'serif',
   checkpointFrequency: 5,
   savedAt: null,
 };
@@ -182,6 +183,35 @@ export async function saveAnnotation(annotation) {
 
 export async function getAnnotationsForDocument(documentId) {
   return safe(async (db) => db.getAllFromIndex('annotations', 'documentId', documentId), []);
+}
+
+export async function deleteDocument(docDbId) {
+  return safe(async (db) => {
+    if (docDbId === null || docDbId === undefined) return false;
+    const documentId = `doc_${docDbId}`;
+    const chunkKeys = await db.getAllKeysFromIndex('chunks', 'documentId', documentId);
+    const annotationKeys = await db.getAllKeysFromIndex('annotations', 'documentId', documentId);
+    const sessionKeys = await db.getAllKeysFromIndex('sessions', 'documentId', documentId);
+    const logKeys = [];
+    for (const sessionId of sessionKeys) {
+      logKeys.push(...(await db.getAllKeysFromIndex('engagementLogs', 'sessionId', sessionId)));
+    }
+    const tx = db.transaction(
+      ['documents', 'chunks', 'annotations', 'sessions', 'engagementLogs'],
+      'readwrite'
+    );
+    tx.objectStore('documents').delete(docDbId);
+    const chunks = tx.objectStore('chunks');
+    chunkKeys.forEach((key) => chunks.delete(key));
+    const annotations = tx.objectStore('annotations');
+    annotationKeys.forEach((key) => annotations.delete(key));
+    const sessions = tx.objectStore('sessions');
+    sessionKeys.forEach((key) => sessions.delete(key));
+    const logs = tx.objectStore('engagementLogs');
+    logKeys.forEach((key) => logs.delete(key));
+    await tx.done;
+    return true;
+  }, false);
 }
 
 export async function getPreferences() {

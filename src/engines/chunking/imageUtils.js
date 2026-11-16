@@ -26,6 +26,46 @@ export function bytesToDataUrl(bytes, mime) {
   return `data:${mime};base64,${bytesToBase64(bytes)}`;
 }
 
+const IMAGE_MAX_DIMENSION = 1280;
+
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('image decode failed'));
+    image.src = src;
+  });
+}
+
+/**
+ * Downscales large embedded images so every figure fits comfortably inside a
+ * reading pane and stays small enough for IndexedDB. In environments without
+ * a DOM (Node tests) the original data URL is returned untouched.
+ */
+export async function downscaleDataUrl(src, maxDimension = IMAGE_MAX_DIMENSION) {
+  if (typeof document === 'undefined' || !src || !src.startsWith('data:image/')) return src;
+  try {
+    const image = await loadImageElement(src);
+    const longest = Math.max(image.naturalWidth, image.naturalHeight);
+    const scale = Math.min(1, maxDimension / (longest || 1));
+    if (scale >= 1) return src;
+    const width = Math.max(1, Math.round(image.naturalWidth * scale));
+    const height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return src;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(image, 0, 0, width, height);
+    const out = canvas.toDataURL('image/png');
+    return out && out.length < src.length ? out : src;
+  } catch {
+    return src;
+  }
+}
+
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
   for (let n = 0; n < 256; n += 1) {

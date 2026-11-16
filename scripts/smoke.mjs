@@ -73,6 +73,11 @@ try {
     if (!clicked) throw new Error(`Could not find button: ${demo}`);
 
     await page.waitForFunction(
+      () => document.body.innerText.includes('How long do you want to read?'),
+      { timeout: 60000 }
+    );
+    await clickButton(page, ['Start reading']);
+    await page.waitForFunction(
       () => document.body.innerText.includes('Chunk 1 of'),
       { timeout: 60000 }
     );
@@ -81,8 +86,9 @@ try {
     while (steps < 40) {
       steps += 1;
       const state = await page.evaluate(() => {
-        if (document.body.innerText.includes('Session summary')) return 'summary';
-        if (document.body.innerText.includes('Quick check')) return 'checkpoint';
+        const text = document.body.innerText.toLowerCase();
+        if (text.includes('session summary')) return 'summary';
+        if (text.includes('quick check')) return 'checkpoint';
         return 'reading';
       });
 

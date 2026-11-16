@@ -187,29 +187,74 @@ function escapeXml(text) {
     .replace(/'/g, '&apos;');
 }
 
-function slideXml(lines) {
-  const paragraphs = lines
-    .map(
-      (line) =>
-        `<a:p><a:r><a:rPr lang="en-US" sz="2000"/><a:t>${escapeXml(line)}</a:t></a:r></a:p>`
-    )
-    .join('');
+function slideXml(title, points) {
+  const para = (text) =>
+    `<a:p><a:r><a:rPr lang="en-US" sz="1800"/><a:t>${escapeXml(text)}</a:t></a:r></a:p>`;
   return (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
     'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
     'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
-    `<p:cSld><p:spTree><p:sp><p:txBody>${paragraphs}</p:txBody></p:sp></p:spTree></p:cSld></p:sld>`
+    '<p:cSld><p:spTree>' +
+    '<p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:txBody>' +
+    para(title) +
+    '</p:txBody></p:sp>' +
+    '<p:sp><p:txBody>' +
+    points.map(para).join('') +
+    '</p:txBody></p:sp>' +
+    '</p:spTree></p:cSld></p:sld>'
   );
 }
 
 const SLIDES = [
-  ['Attention and Learning', 'Why focus matters for study', 'Attention is a limited resource', 'Pacing and rest protect comprehension', 'Checkpoints turn reading into recall'],
-  ['Chunking Study Material', 'Break long documents into small units', 'Each chunk fits in one sitting', 'Natural stopping points reduce overload', 'Progress becomes visible'],
-  ['Retrieval Practice', 'Pull information out of memory', 'Explain the main idea after each chunk', 'Ungraded checkpoints still help', 'Skipping can signal fatigue'],
-  ['Pacing and Fatigue', 'Watch time per chunk', 'Short answers suggest overload', 'Backward navigation suggests lost comprehension', 'Rest before continuing'],
-  ['Planning a Session', 'Compare reading load with available time', 'Reduce the goal instead of rushing', 'Record where to resume', 'Finish a smaller portion well'],
-  ['Reflecting on Progress', 'Summarise what was read', 'Mark confusing and important sections', 'Look for patterns across sessions', 'Use records to plan the next session'],
+  {
+    title: 'Attention and Learning',
+    points: [
+      'Attention is the gateway through which information enters working memory, so a wandering mind means the page is scanned without being understood.',
+      'Directed attention depletes with sustained effort; short sessions with brief rests keep comprehension higher than one long marathon.',
+      'Noticing fatigue early, through slower reading or skipped checkpoints, prevents wasted study time.',
+    ],
+  },
+  {
+    title: 'Chunking Study Material',
+    points: [
+      'Chunking breaks a long document into smaller meaningful units, so each sitting has a clear beginning and end.',
+      'Working memory holds only a handful of items, and short chunks keep the load low enough to notice when understanding breaks down.',
+      'Chunk boundaries create natural stopping points for pausing, reflecting, and deciding whether to continue.',
+    ],
+  },
+  {
+    title: 'Retrieval Practice',
+    points: [
+      'Retrieval practice means pulling information out of memory rather than rereading it, and the effort strengthens the memory trace.',
+      'A checkpoint is a brief ungraded question that interrupts passive reading and forces reconstruction of the main idea.',
+      'Skipping checkpoints repeatedly can signal fatigue or disengagement rather than mastery.',
+    ],
+  },
+  {
+    title: 'Pacing and Fatigue',
+    points: [
+      'Pacing is deliberate control of speed and rest, because racing through a dense page often costs more time than reading carefully once.',
+      'Fatigue shows up as rising time per chunk, shorter checkpoint answers, and backward navigation as the thread is lost.',
+      'When several signals appear together, the responsible response is to stop, rest, and return later.',
+    ],
+  },
+  {
+    title: 'Planning a Session',
+    points: [
+      'A good plan compares the reading load with the time available, which prevents goals that cannot realistically be met.',
+      'If the estimate exceeds the window, reduce the number of chunks instead of rushing through all of them.',
+      'Record where to resume when time is up, so the next session starts without rereading the whole document.',
+    ],
+  },
+  {
+    title: 'Reflecting on Progress',
+    points: [
+      'Reflection turns a session into usable knowledge by summarising what was read, what was confusing, and what to review next.',
+      'Useful records include chunks completed, time spent, checkpoints answered, and marked sections.',
+      'Over time those records reveal which conditions support focus, and that knowledge is as valuable as the content itself.',
+    ],
+  },
 ];
 
 async function buildPptx() {
@@ -262,8 +307,8 @@ async function buildPptx() {
   zip.file('ppt/presentation.xml', presentation);
   zip.file('ppt/_rels/presentation.xml.rels', presentationRels);
 
-  SLIDES.forEach((lines, index) => {
-    zip.file(`ppt/slides/slide${index + 1}.xml`, slideXml(lines));
+  SLIDES.forEach((slide, index) => {
+    zip.file(`ppt/slides/slide${index + 1}.xml`, slideXml(slide.title, slide.points));
   });
 
   return zip.generateAsync({ type: 'nodebuffer' });

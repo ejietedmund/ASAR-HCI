@@ -1,4 +1,4 @@
-const CACHE_NAME = 'acadreader-v2';
+const CACHE_NAME = 'acadreader-v3';
 const INDEX_URL = new URL('./index.html', self.location).href;
 const PRECACHE = [
   './',

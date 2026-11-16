@@ -1,6 +1,6 @@
 import assert from 'node:assert';
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import JSZip from 'jszip';
@@ -104,6 +104,10 @@ function makePdf(pagesLines, pageExtras = []) {
   return Buffer.from(out, 'latin1');
 }
 
+/**
+ * 12 slides of ~100 words each: every slide heading starts its own chunk, so
+ * the deck becomes 12 reading chunks.
+ */
 async function makePptxFixture() {
   const slide = (title, body, pic) =>
     `<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>${title}</a:t></a:r></a:p></p:txBody></p:sp>${
@@ -116,12 +120,19 @@ async function makePptxFixture() {
         : ''
     }</p:spTree></p:cSld></p:sld>`;
   const zip = new JSZip();
+  const sentence = 'Attention models weigh every input token when producing each output. ';
   const titles = [
     'Lecture 6: Attention Models',
     'Why attention matters',
     'Self-attention in detail',
     'Multi-head attention',
     'Positional encoding',
+    'Attention over sequences',
+    'Efficient attention variants',
+    'Training attention models',
+    'Attention in vision',
+    'Limitations and pitfalls',
+    'Recent research directions',
     'Summary and readings',
   ];
   titles.forEach((title, index) => {
@@ -129,7 +140,7 @@ async function makePptxFixture() {
       `ppt/slides/slide${index + 1}.xml`,
       slide(
         title,
-        index === 5 ? '' : `Body text for slide ${index + 1} with enough words to read.`,
+        sentence.repeat(10).trim(),
         index === 0
       )
     );
@@ -209,6 +220,18 @@ async function clickButton(page, text) {
   assert.ok(clicked, `button "${text}" should exist`);
 }
 
+async function clickButtonContaining(page, text) {
+  const clicked = await page.evaluate((needle) => {
+    const button = [...document.querySelectorAll('button')].find((el) =>
+      el.innerText.includes(needle)
+    );
+    if (!button) return false;
+    button.click();
+    return true;
+  }, text);
+  assert.ok(clicked, `button containing "${text}" should exist`);
+}
+
 async function textOf(page, selector) {
   return page.$eval(selector, (el) => el.innerText.trim());
 }
@@ -247,14 +270,19 @@ const browser = await puppeteer.launch({
 
 try {
   const page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 800 });
+  await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'light' }]);
   page.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`));
   page.on('console', (message) => {
     if (message.type() === 'error') errors.push(`console: ${message.text()}`);
   });
 
   await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'networkidle0' });
+  await waitForText(page, 'Focused reading for your study materials');
+  pass('home screen renders');
+  await clickButton(page, 'Open your library');
   await waitForText(page, 'Upload your study material');
-  pass('import screen renders');
+  pass('library/import screen renders');
 
   const pwaReady = await page.evaluate(async () => {
     const registrations = await navigator.serviceWorker.getRegistrations();
@@ -265,42 +293,55 @@ try {
     };
   });
   assert.equal(pwaReady.manifest, true);
-  assert.equal(pwaReady.background, 'rgb(240, 242, 247)');
+  assert.equal(pwaReady.background, 'rgb(242, 242, 247)');
   pass(`manifest linked, background colour correct, sw registrations: ${pwaReady.registrations}`);
 
   const pptx = await makePptxFixture();
   const pptxPath = join(fileURLToPath(new URL('./', import.meta.url)), 'lecture.pptx');
-  const { writeFile } = await import('node:fs/promises');
   await writeFile(pptxPath, pptx);
 
   const input = await page.$('input[type="file"]');
   await input.uploadFile(pptxPath);
-  await waitForText(page, 'Chunk 1 of 6');
-  pass('pptx import creates 6 chunks and opens reading session');
+  await waitForText(page, 'How long do you want to read?');
+  pass('upload lands on the goal planner automatically');
 
-  await waitForMainImage(page);
-  const pptxImage = await page.evaluate(() => {
-    const img = document.querySelector('main img');
-    return { w: img.naturalWidth, h: img.naturalHeight, src: img.src.slice(0, 30) };
-  });
-  assert.equal(pptxImage.w, 1, JSON.stringify(pptxImage));
-  assert.equal(pptxImage.h, 1, JSON.stringify(pptxImage));
-  assert.ok(pptxImage.src.startsWith('data:image/png;base64,'), pptxImage.src);
-  pass('slide image renders from carried pptx media');
+  await waitForText(page, '12 chunks left · about');
+  await clickButton(page, '20 min');
+  await clickButton(page, 'Start reading');
+  await waitForText(page, 'Chunk 1 of 12');
+  const timerText = await page.$eval('[data-testid="goal-timer"]', (el) => el.innerText.trim());
+  assert.match(timerText, /^\d+:\d{2}$/, `goal countdown renders: ${timerText}`);
+  pass('planner starts the session with a reading-time goal and countdown');
 
-  const subHeader = await page.$eval('header + main span', (el) => el.innerText.trim());
-  assert.ok(subHeader.includes('lecture.pptx'), `filename shown: ${subHeader}`);
+  const pptxImageCount = await page.$$eval('main article img', (imgs) => imgs.length);
+  assert.equal(pptxImageCount, 0, `pptx images should be removed, found ${pptxImageCount}`);
+  pass('pptx slide images are not rendered');
+
+  await waitForText(page, 'lecture.pptx');
   await waitForText(page, 'A short check-in comes after chunk 5');
-  pass('reading session shows filename, progress and the next check-in');
+  await waitForText(page, 'Lecture 6: Attention Models');
+  pass('reading session shows filename, progress and the slide heading');
 
   await clickButton(page, 'Next');
   await new Promise((resolve) => setTimeout(resolve, 150));
-  await waitForText(page, 'Chunk 2 of 6');
+  await waitForText(page, 'Chunk 2 of 12');
+  await waitForText(page, 'Why attention matters');
   await clickButton(page, 'Next');
   await new Promise((resolve) => setTimeout(resolve, 150));
-  await waitForText(page, 'Chunk 3 of 6');
-  pass('next navigation walks through chunks');
-
+  await waitForText(page, 'Chunk 3 of 12');
+  pass('each slide starts its own chunk');
+  const readingLayout = await page.evaluate(() => {
+    const article = document.querySelector('main article');
+    const rect = article.getBoundingClientRect();
+    return {
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      ratio: Math.round((rect.width / rect.height) * 1000) / 1000,
+    };
+  });
+  assert.ok(readingLayout.width >= 800, JSON.stringify(readingLayout));
+  assert.ok(Math.abs(readingLayout.ratio - 16 / 9) < 0.08, JSON.stringify(readingLayout));
+  pass('reading pane is a wide, slide-sized landscape card');
   await clickButton(page, 'Next');
   await waitForText(page, 'Quick check');
   const earlyCheck = await page.evaluate(() => document.body.innerText.includes('After chunk 3'));
@@ -309,11 +350,23 @@ try {
 
   await page.type('textarea', 'Attention weights decide which tokens matter.');
   await clickButton(page, 'Submit');
-  await waitForText(page, 'Chunk 4 of 6');
+  await waitForText(page, 'Chunk 4 of 12');
   pass('checkpoint submit advances to the next chunk');
 
+  await waitForText(page, "You're moving through this quickly");
+  pass('skimming detection suggests a break');
+
+  await clickButtonContaining(page, 'Take a 5-minute break');
+  await waitForText(page, 'Rest your eyes for a moment');
+  await waitForText(page, 'Break');
+  pass('break overlay opens with a countdown');
+
+  await clickButton(page, 'Resume reading');
+  await waitForText(page, 'Chunk 4 of 12');
+  pass('break overlay resumes the reading session');
+
   await clickButton(page, 'Mark chunk');
-  await waitForText(page, 'Mark this chunk');
+  await waitForText(page, 'Flag this chunk');
   await clickButton(page, 'Important');
   await clickButton(page, 'Save mark');
   await waitForText(page, 'Marked ✓');
@@ -321,20 +374,27 @@ try {
 
   await clickButton(page, 'Previous');
   await new Promise((resolve) => setTimeout(resolve, 150));
-  await waitForText(page, 'Chunk 3 of 6');
+  await waitForText(page, 'Chunk 3 of 12');
   await clickButton(page, 'Next');
   await waitForText(page, 'Quick check');
   await clickButton(page, 'Skip');
-  await waitForText(page, 'Chunk 4 of 6');
+  await waitForText(page, 'Chunk 4 of 12');
   pass('previous navigation re-opens the check-in for that chunk');
 
-  await clickButton(page, 'Next');
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  await waitForText(page, 'Chunk 5 of 6');
-  await clickButton(page, 'Next');
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  await waitForText(page, 'Chunk 6 of 6');
-  await clickButton(page, 'Finish');
+  for (let guard = 0; guard < 20; guard += 1) {
+    const finished = await page.evaluate(() => document.body.innerText.includes('Session summary'));
+    if (finished) break;
+    const label = await page.evaluate(() => {
+      const buttons = [...document.querySelectorAll('button')];
+      const next = buttons.find((b) => ['Next', 'Finish'].includes(b.innerText.trim()));
+      return next ? next.innerText.trim() : null;
+    });
+    if (!label) break;
+    await clickButton(page, label);
+    const checkpointOpen = await page.evaluate(() => document.body.innerText.toLowerCase().includes('quick check'));
+    if (checkpointOpen) await clickButton(page, 'Skip');
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
   await waitForText(page, 'Session summary');
   pass('finish navigates to the summary screen');
 
@@ -342,8 +402,8 @@ try {
     rows.map((row) => row.innerText.replace(/\n+/g, ' ').trim())
   );
   assert.equal(summaryRows.length, 5);
-  assert.ok(summaryRows.some((row) => row.startsWith('Chunks completed') && row.includes('6 of 6')), summaryRows.join(' | '));
-  assert.ok(summaryRows.some((row) => row.startsWith('Checkpoints answered') && row.includes('1 of 2')), summaryRows.join(' | '));
+  assert.ok(summaryRows.some((row) => row.startsWith('Chunks completed') && row.includes('12 of 12')), summaryRows.join(' | '));
+  assert.ok(summaryRows.some((row) => row.startsWith('Check-ins answered')), summaryRows.join(' | '));
   assert.ok(summaryRows.some((row) => row.startsWith('Chunks marked important') && row.includes('1')), summaryRows.join(' | '));
   pass('summary reports chunks, checkpoints and marks');
 
@@ -351,40 +411,45 @@ try {
   assert.equal(fatigueCard, false);
   pass('no fatigue card when the session looks healthy');
 
-  await clickButton(page, 'Back to library');
-  await waitForText(page, 'Resume a previous document');
-  await waitForText(page, 'Chunk 6 of 6');
+  await waitForText(page, 'Marks in this document');
+  await waitForText(page, 'Chunk 4');
+  await waitForText(page, 'Important');
+  await clickButtonContaining(page, 'Go to chunk 4');
+  await waitForText(page, 'Chunk 4 of 12');
+  pass('summary lists marks with their chunk number and jumps back to them');
+  await clickButton(page, 'Library');
+  await waitForText(page, 'Your library');
+  await waitForText(page, 'Chunk 12 of 12');
   pass('library shows resume progress');
 
-  await clickButton(page, 'Goal planner');
-  await waitForText(page, 'Set a reading goal');
-  await page.$eval('#goal-chunks', (el) => {
-    el.value = '';
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-  });
-  await page.type('#goal-chunks', '100');
-  await page.$eval('#goal-minutes', (el) => {
-    el.value = '';
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-  });
-  await page.type('#goal-minutes', '5');
-  await clickButton(page, 'Check my goal');
-  await waitForText(page, 'Needs adjusting');
-  await waitForText(page, 'Suggested plan');
-  pass('goal planner flags an infeasible goal with a suggested plan');
-
-  await clickButton(page, 'Accept plan');
+  await clickButton(page, 'Goal');
+  await waitForText(page, 'How long do you want to read?');
+  await waitForText(page, 'continuing from chunk 4');
+  await waitForText(page, '9 chunks left');
+  await page.click('#goal-minutes');
+  await page.keyboard.down('Control');
+  await page.keyboard.press('KeyA');
+  await page.keyboard.up('Control');
+  await page.type('#goal-minutes', '1');
+  await waitForText(page, 'The rest can wait for a second session');
+  await waitForText(page, 'remaining chunks');
+  await clickButton(page, '45 min');
   await waitForText(page, 'Looks good');
-  pass('accepting the plan produces a feasible goal');
+  pass('goal planner validates the budget against the chunks that are left');
 
   await clickButton(page, 'Settings');
-  await waitForText(page, 'Saved on this device only');
+  await waitForText(page, 'Preferences are saved on this device only');
   await clickButton(page, 'Large');
-  await clickButton(page, 'High');
-  await clickButton(page, 'Every 3 chunks');
-  await clickButton(page, 'Save settings');
-  await waitForText(page, 'Saved ✓');
-  pass('settings save and confirm');
+  await clickButton(page, 'Dark');
+  await clickButton(page, 'Every 3');
+  await page.waitForFunction(() => {
+    const flash = document.querySelector('[data-testid="saved-flash"]');
+    return flash && flash.classList.contains('opacity-100');
+  });
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  const darkBackground = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  assert.equal(darkBackground, 'rgb(0, 0, 0)');
+  pass('settings apply instantly: large text, dark theme, check-ins every 3');
 
   await clickButton(page, 'Library');
   await waitForText(page, 'Upload your study material');
@@ -393,6 +458,18 @@ try {
   await writeFile(pdfPath, pdf);
   const input2 = await page.$('input[type="file"]');
   await input2.uploadFile(pdfPath);
+  await waitForText(page, 'How long do you want to read?');
+  await page.click('#goal-minutes');
+  await page.keyboard.down('Control');
+  await page.keyboard.press('KeyA');
+  await page.keyboard.up('Control');
+  await page.type('#goal-minutes', '1');
+  await waitForText(page, 'The rest can wait for a second session');
+  await waitForText(page, 'remaining chunks');
+  await clickButton(page, '20 min');
+  await waitForText(page, 'Looks good');
+  pass('goal planner flags an infeasible budget for the remaining chunks');
+  await clickButton(page, 'Start reading');
   await waitForText(page, 'Chunk 1 of 6');
   const firstTitle = await textOf(page, 'main h1');
   assert.equal(firstTitle, 'Introduction');
@@ -401,29 +478,37 @@ try {
   await waitForMainImage(page);
   const pdfImage = await page.evaluate(() => {
     const img = document.querySelector('main img');
-    return { w: img.naturalWidth, h: img.naturalHeight, src: img.src.slice(0, 30) };
+    return {
+      w: img.naturalWidth,
+      h: img.naturalHeight,
+      src: img.src.slice(0, 30),
+      caption: img.closest('figure').querySelector('figcaption').innerText.trim(),
+    };
   });
   assert.equal(pdfImage.w, 4, JSON.stringify(pdfImage));
   assert.equal(pdfImage.h, 4, JSON.stringify(pdfImage));
   assert.ok(pdfImage.src.startsWith('data:image/png;base64,'), pdfImage.src);
-  pass('pdf figure renders in the chunk that surrounds it');
+  assert.equal(pdfImage.caption, 'Figure 1 (Page 1)', JSON.stringify(pdfImage));
+  pass('pdf figure renders in the chunk that surrounds it, captioned');
 
   const bodyStyle = await page.evaluate(() => {
-    const paragraphs = [...document.querySelectorAll('main p')];
+    const paragraphs = [...document.querySelectorAll('main article p')];
     const bodyParagraph = paragraphs.find((p) => p.innerText.length > 120);
     const style = getComputedStyle(bodyParagraph);
-    return { color: style.color, fontSize: style.fontSize, font: style.fontFamily };
+    return { color: style.color, fontSize: style.fontSize };
   });
-  assert.equal(bodyStyle.color, 'rgb(0, 0, 0)');
+  assert.equal(bodyStyle.color, 'rgb(242, 242, 247)');
   assert.equal(bodyStyle.fontSize, '20px');
-  assert.ok(/Lora|Georgia|serif/i.test(await page.$eval('main h1', (el) => getComputedStyle(el).fontFamily)));
+  const headingFont = await page.$eval('main h1', (el) => getComputedStyle(el).fontFamily);
+  assert.ok(/Lora|Georgia|Palatino|serif/i.test(headingFont), headingFont);
   await waitForText(page, 'A short check-in comes after chunk 3');
-  pass('high contrast, large text, Lora headings and the new check-in interval apply');
+  pass('dark theme, large reading text, serif headings and check-in interval apply');
 
   await clickButton(page, 'Next');
   await new Promise((resolve) => setTimeout(resolve, 150));
   await waitForText(page, 'Chunk 2 of 6');
   await clickButton(page, 'Next');
+  await new Promise((resolve) => setTimeout(resolve, 150));
   await waitForText(page, 'Chunk 3 of 6');
   await clickButton(page, 'Next');
   await waitForText(page, 'Quick check');
@@ -443,7 +528,7 @@ try {
     });
     if (!label) break;
     await clickButton(page, label);
-    const checkpointOpen = await page.evaluate(() => document.body.innerText.includes('Quick check'));
+    const checkpointOpen = await page.evaluate(() => document.body.innerText.toLowerCase().includes('quick check'));
     if (checkpointOpen) await clickButton(page, 'Skip');
     await new Promise((resolve) => setTimeout(resolve, 120));
   }
@@ -454,15 +539,53 @@ try {
   await waitForText(page, 'lecture.pdf');
   pass('pdf document is listed in the library');
 
+  await page.evaluate(() => {
+    const button = [...document.querySelectorAll('button')].find(
+      (el) => el.getAttribute('aria-label') === 'Delete lecture.pdf'
+    );
+    if (button) button.click();
+  });
+  await waitForText(page, 'Remove lecture.pdf?');
+  await clickButton(page, 'Delete');
+  await page.waitForFunction(() => !document.body.innerText.includes('lecture.pdf'));
+  await waitForText(page, 'lecture.pptx');
+  pass('documents can be deleted from the library');
+
+  await clickButtonContaining(page, 'lecture.pptx');
+  await waitForText(page, 'How long do you want to read?');
+  await waitForText(page, 'continuing from chunk 12');
+  await page.click('#goal-minutes');
+  await page.keyboard.down('Control');
+  await page.keyboard.press('KeyA');
+  await page.keyboard.up('Control');
+  await page.type('#goal-minutes', '1');
+  await clickButton(page, 'Start reading');
+  await waitForText(page, 'Chunk 12 of 12');
+  await waitForText(page, 'Time is up', 90000);
+  pass('reading-time goal triggers the reminder when time is used up');
+
+  await clickButton(page, 'Keep reading (+5 min)');
+  await page.waitForFunction(() => !document.body.innerText.includes('Time is up'));
+  await page.waitForFunction(() => {
+    const el = document.querySelector('[data-testid="goal-timer"]');
+    return el && /^[45]:\d{2}$/.test(el.innerText.trim());
+  });
+  pass('time-up reminder offers an extension and restarts the countdown');
+
+  await clickButton(page, 'Finish');
+  await waitForText(page, 'Session summary');
+  await waitForText(page, 'finished the document');
+  pass('finishing records the session after the reminder');
+
   const reloadPage = await browser.newPage();
   await reloadPage.goto(`http://localhost:${PORT}/`, { waitUntil: 'networkidle0' });
-  await waitForText(reloadPage, 'Upload your study material');
+  await waitForText(reloadPage, 'Focused reading for your study materials');
   const persisted = await reloadPage.evaluate(async () => {
     const databases = (await indexedDB.databases()).map((db) => db.name);
     return databases.includes('AcademicReader');
   });
   assert.equal(persisted, true);
-  pass('IndexedDB persists across reloads (PWA shell reloads)');
+  pass('home screen renders on reload and IndexedDB persists');
   await reloadPage.close();
 
   const unexpected = errors.filter((entry) => {
@@ -481,4 +604,10 @@ try {
 } finally {
   await browser.close();
   server.close();
+  await rm(join(fileURLToPath(new URL('./', import.meta.url)), 'lecture.pptx'), {
+    force: true,
+  });
+  await rm(join(fileURLToPath(new URL('./', import.meta.url)), 'lecture.pdf'), {
+    force: true,
+  });
 }

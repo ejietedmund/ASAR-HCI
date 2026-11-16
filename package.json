@@ -10,6 +10,7 @@
     "serve": "vite preview --host 127.0.0.1 --port 4173",
     "demo": "node scripts/make-demo.mjs",
     "test": "node scripts/test-engines.mjs",
+    "e2e": "node scripts/e2e.mjs",
     "smoke": "node scripts/smoke.mjs",
     "smoke:offline": "node scripts/smoke-offline.mjs"
   },
