@@ -23,7 +23,36 @@ function isTableSeparator(line) {
 }
 
 export function parseBlocks(body) {
-  const lines = String(body || '').replace(/\r\n/g, '\n').split('\n');
+  const rawLines = String(body || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\u00A7BULLET\u00A7/g, '\n\u2022 ')
+    .split('\n');
+  const lines = [];
+  rawLines.forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      lines.push('');
+      return;
+    }
+    // Split inline bullet runs that survived as one line (renderer fallback).
+    const bulletParts = trimmed.split(/(?=\s[\u2022\u25CF\u25AA\u25E6\u25A0\u25A1\u25B8]\s+)/).map((p) => p.trim()).filter(Boolean);
+    if (bulletParts.length > 1) {
+      bulletParts.forEach((p) => {
+        if (/^[\u2022\u25CF\u25AA\u25E6\u25A0\u25A1\u25B8]\s*/.test(p)) lines.push(p);
+        else lines.push(p.startsWith('\u2022') ? p : `\u2022 ${p}`);
+      });
+      return;
+    }
+    // Split inline numbered runs "1. A 2. B" that survived as one line.
+    const numberedParts = trimmed.split(/\s+(?=\d{1,3}[.)]\s+\S)/g).map((p) => p.trim()).filter(Boolean);
+    const numberedCount = numberedParts.filter((p) => /^\d{1,3}[.)]\s+/.test(p)).length;
+    if (numberedParts.length > 1 && numberedCount >= 2) {
+      numberedParts.forEach((p) => lines.push(p));
+      return;
+    }
+    lines.push(line);
+  });
+
   const blocks = [];
   let paragraph = [];
   let list = null;
@@ -45,7 +74,14 @@ export function parseBlocks(body) {
     const trimmed = line.trim();
     if (!trimmed) {
       flushParagraph();
-      flushList();
+      // Keep a list open across blank lines if the next content continues it
+      // (e.g. chunk bodies that joined items with \n\n).
+      let j = i + 1;
+      while (j < lines.length && !lines[j].trim()) j += 1;
+      const next = j < lines.length ? lines[j].trim() : '';
+      const nextBullet = list && list.type === 'bullets' && BULLET_MATCH.test(next);
+      const nextNumbered = list && list.type === 'numbered' && NUMBER_MATCH.test(next);
+      if (!nextBullet && !nextNumbered) flushList();
       continue;
     }
 
@@ -101,7 +137,8 @@ export function parseBlocks(body) {
         flushList();
         list = { type: 'numbered', items: [] };
       }
-      list.items.push({ level: 0, text: numbered[2].trim() });
+      const num = parseInt(numbered[1], 10);
+      list.items.push({ level: 0, text: numbered[2].trim(), number: Number.isFinite(num) ? num : undefined });
       continue;
     }
 
@@ -207,7 +244,7 @@ function Blocks({ blocks, textClass, headingClass }) {
       <ul key={index} className="space-y-2.5">
         {block.items.map((item, itemIndex) => {
           const mark = isNumbered ? (
-            <span className="text-brand/90 font-semibold tabular-nums shrink-0">{itemIndex + 1}.</span>
+            <span className="text-brand/90 font-semibold tabular-nums shrink-0">{item.number || itemIndex + 1}.</span>
           ) : (
             <span className={`${LIST_MARK_CLASS[item.level] || LIST_MARK_CLASS[2]} shrink-0`}>{BULLET_MARKS[item.level] || '•'}</span>
           );

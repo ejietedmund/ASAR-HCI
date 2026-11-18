@@ -317,6 +317,17 @@ export async function chunkPptx(arrayBuffer) {
 
   const chunks = [];
 
+  const isListBody = (text) => /^[\u2022\u25E6\u25AA\u25B8\-*]\s+/.test(text) || /^\d{1,3}[.)]\s+/.test(text);
+  const joinBodyParts = (parts) => {
+    let out = '';
+    parts.forEach((part, i) => {
+      if (i === 0) { out = part; return; }
+      const prev = parts[i - 1];
+      out += ((isListBody(prev) && isListBody(part)) ? '\n' : '\n\n') + part;
+    });
+    return out;
+  };
+
   const pushSlideChunk = (slide, units, groupIndex = 0) => {
     const continued = groupIndex > 0;
     const bodyParts = [];
@@ -328,7 +339,7 @@ export async function chunkPptx(arrayBuffer) {
       else number = 0;
       bodyParts.push(formatUnit(unit, number));
     }
-    const body = bodyParts.join('\n\n');
+    const body = joinBodyParts(bodyParts);
     chunks.push({
       title: slide.title || `Slide ${slide.number}`,
       body,

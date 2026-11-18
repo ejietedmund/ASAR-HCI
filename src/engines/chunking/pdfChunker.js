@@ -1,4 +1,4 @@
-﻿import * as pdfjsLib from 'pdfjs-dist';
+import * as pdfjsLib from 'pdfjs-dist';
 import { downscaleDataUrl, imageObjToDataUrl } from './imageUtils.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -205,23 +205,28 @@ async function extractPages(arrayBuffer) {
  * (e.g. "1. A 2. B 3. C") onto separate lines so each item renders distinctly.
  */
 export function splitBulletSegments(text) {
-  const raw = (text || '').replace(/\u00A7BULLET\u00A7/g, ' \u00A7BULLET\u00A7 ').replace(/\s+/g, ' ').trim();
+  const raw = String(text || '')
+    .replace(/[\u2022\u2023\u2043\u2219\u25A0-\u25FF\u27A2\u27A4\u2713\u2714\u2726\u2756]/g, ' \u00A7BULLET\u00A7 ')
+    .replace(/\u00A7BULLET\u00A7/g, ' \u00A7BULLET\u00A7 ')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (!raw) return [];
-  let segments = raw
-    .split('\u00A7BULLET\u00A7')
-    .map((part) => part.trim())
-    .filter(Boolean);
-  if (segments.length > 1) {
-    segments = segments.map((segment, index) => (index === 0 ? segment : `\u2022 ${segment}`));
-  }
+  const parts = raw.split('\u00A7BULLET\u00A7');
+  const segments = [];
+  parts.forEach((part, index) => {
+    const trimmed = part.trim();
+    if (!trimmed) return;
+    // Text after a bullet sentinel is a list item.
+    segments.push(index > 0 ? `\u2022 ${trimmed}` : trimmed);
+  });
 
   const out = [];
   for (const seg of segments) {
     // Split runs of inline numbered items: "1. ... 2. ... 3. ..."
-    const parts = seg.split(/\s+(?=\d{1,3}[.)]\s+\S)/g).map((p) => p.trim()).filter(Boolean);
-    const numberedCount = parts.filter((p) => /^\d{1,3}[.)]\s/.test(p)).length;
-    if (parts.length > 1 && numberedCount >= 2) {
-      out.push(...parts);
+    const nParts = seg.split(/\s+(?=\d{1,3}[.)]\s+\S)/g).map((p) => p.trim()).filter(Boolean);
+    const numberedCount = nParts.filter((p) => /^\d{1,3}[.)]\s/.test(p)).length;
+    if (nParts.length > 1 && numberedCount >= 2) {
+      out.push(...nParts);
     } else {
       out.push(seg);
     }
@@ -297,7 +302,7 @@ function detectTableBlocks(items) {
       const occupancy = totalCells ? nonEmpty / totalCells : 0;
       const rowsWithMulti = tableRows.filter((r) => r.filter(Boolean).length >= 2).length;
       const avgLen = nonEmpty ? tableRows.flat().filter(Boolean).join(' ').length / nonEmpty : 0;
-      const bulletish = tableRows.some((r) => r.some((c) => /^[\u2022â—¦â–ª\-\*]/.test(c)));
+      const bulletish = tableRows.some((r) => r.some((c) => /^[\u2022◦▪\-\*]/.test(c)));
       const sentenceLike = avgLen > 42; // prose wrapped across pseudo-columns
       const looksTabular = rowsWithMulti >= Math.max(2, Math.ceil(tableRows.length * 0.7));
 
@@ -414,10 +419,10 @@ function stripRunningHeaders(lines) {
 }
 
 const PAGE_NUMBER_PATTERNS = [
-  /^(?:page|p\.?)\s*\d{1,4}(?:\s*(?:of|\/|–|-|to)\s*\d{1,4})?$/i,
+  /^(?:page|p\.?)\s*\d{1,4}(?:\s*(?:of|\/|�|-|to)\s*\d{1,4})?$/i,
   /^\d{1,4}$/,
   /^\d{1,4}\s*\/\s*\d{1,4}$/,
-  /^[-–.(\[]?\s*\d{1,4}\s*[-–.)\]]?$/,
+  /^[-�.(\[]?\s*\d{1,4}\s*[-�.)\]]?$/,
 ];
 
 /** Footer/header page numbers ("12", "Page 3", "- 7 -", "3 / 20") are noise. */
@@ -456,7 +461,7 @@ function modalFontSize(lines) {
 }
 
 const BOLD_FONT = /(bold|black|heavy|semibold|semi-bold|demibold|demi(?!-?light))/i;
-const BULLET_START = /^[•◦▪▸*\-–.]\s*/;
+const BULLET_START = /^[\u2022\u2023\u2043\u2219\u25E6\u25CF\u25AA\u25A0\u25A1\u25B8·*\-–.]\s*/;
 
 /**
  * A heading is a short, unpunctuated line that stands apart from the body by
@@ -499,7 +504,7 @@ function buildParagraphs(lines) {
   const paragraphs = [];
   let current = null;
   for (const line of lines) {
-    const isBullet = /^[\u2022●▪◦■□]/.test(line.text);
+    const isBullet = /^[\u2022???�?]/.test(line.text);
     const isNumbered = /^\d{1,3}[.)]\s+/.test(line.text);
     const listItem = isBullet || isNumbered;
     const gap = current && current.pageNum === line.pageNum ? line.y - current.lastY : Number.POSITIVE_INFINITY;
@@ -569,7 +574,7 @@ function buildUnits(lines) {
       });
     };
     for (const line of cleaned) {
-      if (/^[\u2022●▪◦■□]/.test(line) || /^\d{1,3}[.)]\s+/.test(line)) {
+      if (/^[\u2022???�?]/.test(line) || /^\d{1,3}[.)]\s+/.test(line)) {
         pushUnit(line);
         continue;
       }
@@ -710,7 +715,7 @@ function pagesLabel(coverage) {
   const pageNumbers = [...new Set((coverage || []).map((range) => range.pageNum))].sort((a, b) => a - b);
   if (!pageNumbers.length) return '';
   if (pageNumbers.length === 1) return `Page ${pageNumbers[0]}`;
-  return `Pages ${pageNumbers[0]}\u2013${pageNumbers[pageNumbers.length - 1]}`;
+  return `Pages ${pageNumbers[0]}\u2022 - 1]}`;
 }
 
 function chunksFromGroups(groups, sectionTitle) {
@@ -745,7 +750,7 @@ function buildSectionChunks(lines, sectionTitle) {
   if (sectionTitle === null && units.length) {
     // Paragraph strategy: a short opening line can act as the section title.
     const first = units[0];
-    if (first.text.length < HEADING_MAX_CHARS && !/^[\u2022â—¦]/.test(first.text)) {
+    if (first.text.length < HEADING_MAX_CHARS && !/^[\u2022◦]/.test(first.text)) {
       const rest = units.slice(1);
       const restWords = rest.reduce((sum, unit) => sum + unit.wordCount, 0);
       if (restWords >= MIN_CHUNK_WORDS) {
@@ -834,7 +839,7 @@ function slideDeckChunks(lines, pages, bodySize) {
         countWords(first.text) <= 12 &&
         first.text.length <= HEADING_MAX_CHARS &&
         !/[.;,]$/.test(first.text) &&
-        !/^[\u2022â—¦â–ª]/.test(first.text)
+        !/^[\u2022◦▪]/.test(first.text)
       ) {
         titleLine = first;
       }
